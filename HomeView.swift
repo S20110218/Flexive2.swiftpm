@@ -88,6 +88,22 @@ struct HomeView: View {
                 }
                 .padding(.bottom, 40)
             }
+
+            if let cameraErrorMessage = viewModel.cameraErrorMessage {
+                VStack(spacing: 8) {
+                    Text("Camera Unavailable")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text(cameraErrorMessage)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.white.opacity(0.9))
+                }
+                .padding(16)
+                .background(Color.black.opacity(0.75))
+                .cornerRadius(12)
+                .padding()
+            }
         }
         .onAppear {
             viewModel.startSession()

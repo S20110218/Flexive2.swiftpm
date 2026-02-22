@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import Vision
 
 enum PoseType: String {
@@ -13,6 +13,9 @@ class BodyCheckViewModel: NSObject, ObservableObject {
 
     // ===== カメラ =====
     let session = AVCaptureSession()
+    @Published var cameraErrorMessage: String?
+    private var isSessionConfigured = false
+    private let cameraQueue = DispatchQueue(label: "BodyCheck.camera.queue")
 
     // ===== ポーズ =====
     @Published var currentPoseIndex: Int = 0
@@ -37,33 +40,99 @@ class BodyCheckViewModel: NSObject, ObservableObject {
     // MARK: - 初期化
     override init() {
         super.init()
-        setupCamera()
+        Task { @MainActor [weak self] in
+            await self?.prepareCamera()
+        }
         startTimer()
     }
 
-    // MARK: - カメラ設定
-    func setupCamera() {
-        session.beginConfiguration()
-
-        guard let device = AVCaptureDevice.default(for: .video),
-              let input = try? AVCaptureDeviceInput(device: device)
-        else { return }
-
-        if session.canAddInput(input) {
-            session.addInput(input)
+    private func prepareCamera() async {
+        let isAuthorized = await ensureCameraAuthorization()
+        guard isAuthorized else {
+            cameraErrorMessage = "Camera access is denied. Allow camera access in Settings."
+            return
         }
+
+        guard setupCameraIfNeeded() else { return }
+
+        if !session.isRunning {
+            let captureSession = session
+            cameraQueue.async {
+                captureSession.startRunning()
+            }
+        }
+    }
+
+    // MARK: - カメラ設定
+    private func setupCameraIfNeeded() -> Bool {
+        if isSessionConfigured {
+            return true
+        }
+
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+            ?? AVCaptureDevice.default(for: .video) else {
+            cameraErrorMessage = "No camera device is available on this runtime."
+            return false
+        }
+
+        guard let input = try? AVCaptureDeviceInput(device: device) else {
+            cameraErrorMessage = "Failed to create camera input."
+            return false
+        }
+
+        guard session.canAddInput(input) else {
+            cameraErrorMessage = "Cannot add camera input to session."
+            return false
+        }
+        session.addInput(input)
 
         let output = AVCaptureVideoDataOutput()
 
         // delegate は extension 側で受ける
-        output.setSampleBufferDelegate(self, queue: DispatchQueue(label: "cameraQueue"))
+        output.setSampleBufferDelegate(self, queue: cameraQueue)
+        output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+        output.alwaysDiscardsLateVideoFrames = true
 
-        if session.canAddOutput(output) {
-            session.addOutput(output)
+        guard session.canAddOutput(output) else {
+            cameraErrorMessage = "Cannot add camera output to session."
+            return false
+        }
+        session.addOutput(output)
+
+        if let connection = output.connection(with: .video) {
+            if connection.isVideoOrientationSupported {
+                connection.videoOrientation = .portrait
+            }
+            if connection.isVideoMirroringSupported && device.position == .front {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = true
+            }
         }
 
-        session.commitConfiguration()
-        session.startRunning()
+        isSessionConfigured = true
+        cameraErrorMessage = nil
+        return true
+    }
+
+    private func ensureCameraAuthorization() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
     }
 
     // MARK: - タイマー
@@ -71,11 +140,13 @@ class BodyCheckViewModel: NSObject, ObservableObject {
         timeRemaining = 10
 
         timer?.invalidate()
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { _ in
-            self.timeRemaining -= 1
-
-            if self.timeRemaining <= 0 {
-                self.failPose()
+        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+            guard let self else { return }
+            Task { @MainActor in
+                self.timeRemaining -= 1
+                if self.timeRemaining <= 0 {
+                    self.failPose()
+                }
             }
         }
     }

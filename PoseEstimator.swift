@@ -7,6 +7,7 @@ final class PoseEstimator {
     private let request = VNDetectHumanBodyPoseRequest()
 
     func process(sampleBuffer: CMSampleBuffer,
+                 orientation: CGImagePropertyOrientation,
                  completion: @escaping (VNHumanBodyPoseObservation?) -> Void) {
 
         guard let buffer = CMSampleBufferGetImageBuffer(sampleBuffer) else {
@@ -14,7 +15,7 @@ final class PoseEstimator {
             return
         }
 
-        let handler = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: .leftMirrored)
+        let handler = VNImageRequestHandler(cvPixelBuffer: buffer, orientation: orientation)
 
         do {
             try handler.perform([request])

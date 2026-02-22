@@ -1,5 +1,5 @@
 import Foundation
-import AVFoundation
+@preconcurrency import AVFoundation
 import Vision
 import SwiftUI
 
@@ -23,74 +23,114 @@ class GameViewModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
     @Published var isNextPoseButtonEnabled: Bool = false
     @Published var isBossPhase: Bool = false
     @Published var currentBossPose: GamePose? = nil
+    @Published var cameraErrorMessage: String?
     private let bossScoreThreshold: Int = 60
 
     nonisolated(unsafe) private var isCheckingPose = false
     nonisolated(unsafe) private var currentPoseForCapture: GamePose = .armsUp
+    private var isSessionConfigured = false
 
     private var poseTimer: Timer?
 
     // ===== Init =====
     override init() {
         super.init()
-        setupCamera()
     }
 
     // ===== Camera Setup =====
-    private func setupCamera() {
+    private func setupCameraIfNeeded() -> Bool {
+        if isSessionConfigured {
+            return true
+        }
+
         captureSession.beginConfiguration()
+        defer { captureSession.commitConfiguration() }
         captureSession.sessionPreset = .high
 
+        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera,
+                                                   for: .video,
+                                                   position: .front)
+            ?? AVCaptureDevice.default(.builtInWideAngleCamera,
+                                       for: .video,
+                                       position: .back)
+            ?? AVCaptureDevice.default(for: .video) else {
+            cameraErrorMessage = "No camera device is available on this runtime."
+            return false
+        }
+
         guard
-            let device = AVCaptureDevice.default(.builtInWideAngleCamera,
-                                                 for: .video,
-                                                 position: .front),
             let input = try? AVCaptureDeviceInput(device: device),
             captureSession.canAddInput(input)
-        else { return }
+        else {
+            cameraErrorMessage = "Failed to configure camera input."
+            return false
+        }
 
         captureSession.addInput(input)
 
-        if captureSession.canAddOutput(videoOutput) {
-            videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
-            captureSession.addOutput(videoOutput)
+        guard captureSession.canAddOutput(videoOutput) else {
+            cameraErrorMessage = "Failed to configure camera output."
+            return false
+        }
+        videoOutput.setSampleBufferDelegate(self, queue: captureQueue)
+        captureSession.addOutput(videoOutput)
 
-            if let connection = videoOutput.connection(with: .video) {
-                if connection.isVideoOrientationSupported {
-                    connection.videoOrientation = .portrait
-                }
-                // For front camera, mirror so it feels natural like a selfie view
-                if connection.isVideoMirroringSupported {
-                    connection.isVideoMirrored = true
-                }
-                // Stabilization (optional)
-                if connection.isVideoStabilizationSupported {
-                    connection.preferredVideoStabilizationMode = .standard
-                }
+        if let connection = videoOutput.connection(with: .video) {
+            if connection.isVideoOrientationSupported {
+                connection.videoOrientation = .portrait
             }
-
-            videoOutput.alwaysDiscardsLateVideoFrames = true
-            // Set a pixel format commonly used by Vision
-            videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+            // For front camera, mirror so it feels natural like a selfie view
+            if connection.isVideoMirroringSupported && device.position == .front {
+                connection.automaticallyAdjustsVideoMirroring = false
+                connection.isVideoMirrored = true
+            }
+            // Stabilization (optional)
+            if connection.isVideoStabilizationSupported {
+                connection.preferredVideoStabilizationMode = .standard
+            }
         }
 
-        captureSession.commitConfiguration()
+        videoOutput.alwaysDiscardsLateVideoFrames = true
+        // Set a pixel format commonly used by Vision
+        videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA]
+
+        isSessionConfigured = true
+        cameraErrorMessage = nil
+        return true
     }
 
     // ===== Game Control =====
     func startGame() {
-        isBossPhase = false
-        currentBossPose = nil
-        if !captureSession.isRunning {
-            captureSession.startRunning()
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let isAuthorized = await self.ensureCameraAuthorization()
+            guard isAuthorized else {
+                self.cameraErrorMessage = "Camera access is denied. Allow camera access in Settings."
+                return
+            }
+
+            guard self.setupCameraIfNeeded() else { return }
+
+            self.isBossPhase = false
+            self.currentBossPose = nil
+            if !self.captureSession.isRunning {
+                let session = self.captureSession
+                self.captureQueue.async {
+                    session.startRunning()
+                }
+            }
+            self.startTimers()
+            self.selectRandomPose()
+            self.isNextPoseButtonEnabled = false
+            self.cameraErrorMessage = nil
         }
-        startTimers()
-        selectRandomPose()
-        isNextPoseButtonEnabled = false
     }
 
     func stopGame() {
-        captureSession.stopRunning()
+        let session = captureSession
+        captureQueue.async {
+            session.stopRunning()
+        }
         poseTimer?.invalidate()
         gameEnded = true
     }
@@ -148,6 +188,23 @@ class GameViewModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         selectRandomPose()
     }
 
+    private func ensureCameraAuthorization() async -> Bool {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            return true
+        case .notDetermined:
+            return await withCheckedContinuation { continuation in
+                AVCaptureDevice.requestAccess(for: .video) { granted in
+                    continuation.resume(returning: granted)
+                }
+            }
+        case .denied, .restricted:
+            return false
+        @unknown default:
+            return false
+        }
+    }
+
     // MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
     nonisolated func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         if isCheckingPose { return }
@@ -160,8 +217,10 @@ class GameViewModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
             .leftWrist, .rightWrist, .leftHip, .rightHip, .leftKnee, .rightKnee,
             .leftAnkle, .rightAnkle
         ]
+        
+        let imageOrientation: CGImagePropertyOrientation = connection.isVideoMirrored ? .upMirrored : .up
 
-        estimator.process(sampleBuffer: sampleBuffer) { [weak self] observation in
+        estimator.process(sampleBuffer: sampleBuffer, orientation: imageOrientation) { [weak self] observation in
             guard let self = self, let observation = observation else {
                 self?.isCheckingPose = false
                 return

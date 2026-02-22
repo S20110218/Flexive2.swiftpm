@@ -66,12 +66,21 @@ struct BodyCheckView: View {
                 .background(Color.white)
                 .cornerRadius(20)
             }
-        }
-        .onChange(of: viewModel.score) { newValue in
-            // スコアが30を超えたら自動で次のポーズへ
-            // 古い値を推定: 直前が newValue - delta として扱うのではなく、しきい値をまたいだかだけを判定
-            if newValue > 30 {
-                viewModel.advanceToNextPose()
+
+            if let cameraErrorMessage = viewModel.cameraErrorMessage {
+                VStack(spacing: 8) {
+                    Text("Camera Unavailable")
+                        .font(.headline)
+                        .foregroundColor(.white)
+                    Text(cameraErrorMessage)
+                        .font(.subheadline)
+                        .multilineTextAlignment(.center)
+                        .foregroundColor(.white.opacity(0.9))
+                }
+                .padding(16)
+                .background(Color.black.opacity(0.75))
+                .cornerRadius(12)
+                .padding()
             }
         }
     }
