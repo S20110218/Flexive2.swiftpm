@@ -105,6 +105,9 @@ class HomeViewModel: NSObject, ObservableObject, AVCaptureVideoDataOutputSampleB
         self.score = 0.0
         // Prevent stale frames from immediately skipping another pose.
         self.autoAdvanceCooldownUntil = Date().addingTimeInterval(0.35)
+        
+        let soundPlayer = SoundPlayer()
+        soundPlayer.playOkSound()
     }
     
     // MARK: - Camera Setup

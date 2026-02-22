@@ -35,7 +35,7 @@ struct HomeView: View {
 
                         // お題のスケルトン
                         SkeletonOverlayView(joints: viewModel.currentPoseTemplate.joints, color: .cyan)
-                            .frame(width: 150, height: 250)
+                            .frame(width: 300, height: 420)
                             .background(Color.black.opacity(0.3))
                             .cornerRadius(16)
                     }
